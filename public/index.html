@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sequence Analysis</title>
+<style>
+  :root {
+    --bg:          #f6f6f4;
+    --surface:     #ffffff;
+    --surface-2:   #fbfbfa;
+    --border:      #e7e7e3;
+    --border-2:    #d6d6d0;
+    --ink:         #1c1c1a;
+    --ink-2:       #63635e;
+    --ink-3:       #93938c;
+    --accent:      #3f6f8f;
+
+    --a: #8fd9be;  --a-ink: #2c8663;
+    --c: #a9cef0;  --c-ink: #2a6d9e;
+    --g: #f2c3ac;  --g-ink: #b26a48;
+    --t: #d8d5c9;  --t-ink: #8a8471;
+    --x: #e3e3de;  --x-ink: #9a9a92;
+
+    --tint-a: #ecf8f2;
+    --tint-c: #ecf3fb;
+    --tint-g: #fdf2eb;
+
+    --danger:    #a33f38;
+    --danger-bg: #fdf4f2;
+    --danger-br: #edd2cb;
+
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #17181a;
+      --surface:   #1f2023;
+      --surface-2: #26272b;
+      --border:    #323338;
+      --border-2:  #45464d;
+      --ink:       #ececed;
+      --ink-2:     #a6a6ab;
+      --ink-3:     #77777e;
+      --accent:    #86b4d2;
+
+      --a: #3f7f68;  --a-ink: #86d3b3;
+      --c: #3a6588;  --c-ink: #9cc8ec;
+      --g: #8a6047;  --g-ink: #edb494;
+      --t: #63604f;  --t-ink: #cfcab4;
+      --x: #3a3b40;  --x-ink: #8e8e96;
+
+      --tint-a: #1b2b25;
+      --tint-c: #1a2531;
+      --tint-g: #2c241e;
+
+      --danger:    #e79a94;
+      --danger-bg: #2b1e1c;
+      --danger-br: #4a3330;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 720px; margin: 0 auto; padding: 0 20px 100px; }
+
+  header { padding: 52px 0 32px; text-align: center; }
+  header h1 { font-size: 24px; font-weight: 600; margin: 0 0 5px; letter-spacing: -0.015em; }
+  header p  { margin: 0 0 18px; font-size: 14px; color: var(--ink-3); }
+
+  .strand {
+    display: flex; gap: 3px; width: 136px; height: 5px;
+    margin: 0 auto; border-radius: 3px; overflow: hidden;
+  }
+  .strand i { flex: 1; }
+  .strand .ba { background: var(--a); }
+  .strand .bc { background: var(--c); }
+  .strand .bg { background: var(--g); }
+  .strand .bt { background: var(--t); }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  /* ---------- dropzone ---------- */
+
+  .drop {
+    border: 1px dashed var(--border-2);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    padding: 38px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  .drop:hover { border-color: var(--accent); }
+  .drop.over  { border-color: var(--accent); background: var(--surface); }
+  .drop:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .drop svg { display: block; margin: 0 auto 10px; color: var(--c-ink); }
+  .drop strong { display: block; font-size: 15px; font-weight: 500; }
+  .drop span   { display: block; margin-top: 5px; font-size: 13.5px; color: var(--ink-3); }
+  .drop[aria-busy="true"] { cursor: progress; }
+
+  input[type=file] { display: none; }
+
+  /* ---------- message ---------- */
+
+  .msg {
+    margin-top: 16px;
+    padding: 13px 16px;
+    border: 1px solid var(--danger-br);
+    border-radius: var(--radius);
+    background: var(--danger-bg);
+    color: var(--danger);
+    font-size: 14px;
+  }
+
+  /* ---------- filename ---------- */
+
+  .filename {
+    margin: 22px 0 12px;
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink-2);
+    word-break: break-all;
+  }
+
+  /* ---------- stat grid ---------- */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 520px) { .stats { grid-template-columns: 1fr 1fr; } }
+
+  .stat { padding: 16px 18px; }
+  .stat .label { font-size: 13px; color: var(--ink-2); margin: 0 0 6px; }
+  .stat .value { font-size: 25px; font-weight: 500; letter-spacing: -0.02em; margin: 0; }
+  .stat .value small { font-size: 15px; font-weight: 400; opacity: .65; margin-left: 1px; }
+
+  .stat-len { background: var(--tint-c); border-color: var(--c); }
+  .stat-len .value { color: var(--c-ink); }
+  .stat-gc  { background: var(--tint-g); border-color: var(--g); }
+  .stat-gc  .value { color: var(--g-ink); }
+  .stat-num { background: var(--tint-a); border-color: var(--a); }
+  .stat-num .value { color: var(--a-ink); }
+
+  /* ---------- composition ---------- */
+
+  .comp { padding: 16px 18px 18px; margin-bottom: 12px; }
+  .comp .label { font-size: 13px; color: var(--ink-2); margin: 0 0 13px; }
+
+  .bar { display: flex; gap: 2px; height: 28px; border-radius: 5px; overflow: hidden; }
+  .bar div { height: 100%; }
+  .bar .sa { background: var(--a); }
+  .bar .sc { background: var(--c); }
+  .bar .sg { background: var(--g); }
+  .bar .st { background: var(--t); }
+  .bar .sx { background: var(--x); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 11px; font-size: 12.5px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+
+  /* ---------- records ---------- */
+
+  .section-label { font-size: 13px; color: var(--ink-2); margin: 26px 0 10px; }
+
+  .records summary { cursor: pointer; width: fit-content; }
+  .records summary:hover { color: var(--accent); }
+  .records summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+
+  .record { padding: 15px 18px; border-bottom: 1px solid var(--border); }
+  .record:last-child { border-bottom: 0; }
+  .record h2 {
+    font-family: var(--mono); font-size: 12.5px; font-weight: 400;
+    color: var(--ink-2); margin: 0 0 9px; word-break: break-all;
+  }
+  .record .rstats { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); margin: 0; }
+  .record .rstats span + span { margin-left: 16px; }
+
+  /* ---------- history ---------- */
+
+  .past { list-style: none; margin: 0; padding: 0; }
+  .past li {
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    padding: 13px 18px; border-bottom: 1px solid var(--border);
+  }
+  .past li:last-child { border-bottom: 0; }
+  .past button {
+    background: none; border: 0; padding: 0; font: inherit;
+    font-family: var(--mono); font-size: 13px; color: var(--ink);
+    cursor: pointer; text-align: left; word-break: break-all;
+  }
+  .past button:hover { color: var(--accent); }
+  .past button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+  .past .when { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
+
+  .empty { padding: 20px 18px; font-size: 14px; color: var(--ink-3); margin: 0; }
+
+  [hidden] { display: none !important; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>Sequence Analysis</h1>
+    <p>Drop in a FASTA file for composition and statistics.</p>
+    <div class="strand" aria-hidden="true"><i class="ba"></i><i class="bc"></i><i class="bg"></i><i class="bt"></i></div>
+  </header>
+
+  <div class="drop" id="drop" role="button" tabindex="0" aria-label="Choose a FASTA file to analyse">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+    </svg>
+    <strong id="dropTitle">Drop a FASTA file here</strong>
+    <span id="dropHint">or click to choose one — up to 2 MB</span>
+  </div>
+  <input type="file" id="file" accept=".fasta,.fa,.fna,.ffn,.frn,.txt">
+
+  <div class="msg" id="msg" role="alert" hidden></div>
+
+  <section id="results" hidden>
+    <p class="filename" id="rFile"></p>
+
+    <div class="stats">
+      <div class="card stat stat-len"><p class="label">Length</p><p class="value" id="sLength">—</p></div>
+      <div class="card stat stat-gc"><p class="label">GC content</p><p class="value" id="sGC">—</p></div>
+      <div class="card stat stat-num"><p class="label">Sequences</p><p class="value" id="sCount">—</p></div>
+    </div>
+
+    <div class="card comp">
+      <p class="label">Base composition</p>
+      <div class="bar" id="bar" role="img" aria-label="Base composition"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+
+    <details class="records" id="recordsBox">
+      <summary class="section-label" id="recordsLabel">Records</summary>
+      <div class="card" id="records"></div>
+    </details>
+  </section>
+
+  <p class="section-label">Previous analyses</p>
+  <div class="card">
+    <ul class="past" id="history"></ul>
+    <p class="empty" id="historyEmpty">Nothing analysed yet.</p>
+  </div>
+
+</div>
+
+<script>
+const MAX_BYTES = 2 * 1024 * 1024;  // same 2 MiB limit the server enforces
+const MAX_SHOWN = 200;              // records rendered per analysis
+const AUTO_OPEN = 10;               // record lists this short start expanded
+const BASES = [['a','A'],['c','C'],['g','G'],['t','T'],['x','other']];
+
+const el = id => document.getElementById(id);
+const drop = el('drop'), fileInput = el('file'), msg = el('msg');
+let busy = false;
+
+const num = n => Number(n).toLocaleString('en-US');
+const gcText = f => f === null ? '—' : (f * 100).toFixed(1) + '%';  // null: no A/C/G/T in record
+
+// The only way text reaches the page: textContent is never parsed as HTML,
+// so a header like <img src=x onerror=...> is shown, not run.
+function make(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+// Every API call goes through here, so every failure becomes a message fit
+// for the user: the API's own {"message"}, or a fallback when the response
+// isn't ours (e.g. Vercel rejecting a body over 4.5 MB before it reaches us).
+async function api(path, options, fallback) {
+  let response;
+  try {
+    response = await fetch(path, options);
+  } catch {
+    throw new Error('Could not reach the server. Check your connection and try again.');
+  }
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data) throw new Error(data?.message || fallback);
+  return data;
+}
+
+const showError = t => { msg.textContent = t; msg.hidden = false; };
+const clearError = () => { msg.hidden = true; };
+
+function relative(iso) {
+  const then = new Date(iso);
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1)  return 'just now';
+  if (mins < 60) return mins + ' min ago';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24)  return hrs + (hrs === 1 ? ' hour ago' : ' hours ago');
+  const days = Math.round(hrs / 24);
+  if (days < 30) return days + (days === 1 ? ' day ago' : ' days ago');
+  return then.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
+function statValue(node, value, unit) {
+  node.replaceChildren(value);
+  if (unit) node.append(' ', make('small', null, unit));
+}
+
+function renderAnalysis(d) {
+  const seqs = d.sequences;
+
+  const totals = { a:0, c:0, g:0, t:0, x:0 };
+  for (const s of seqs) {
+    totals.a += s.count_a; totals.c += s.count_c;
+    totals.g += s.count_g; totals.t += s.count_t;
+    totals.x += s.count_other;
+  }
+  const all = totals.a + totals.c + totals.g + totals.t + totals.x;  // > 0: empty records are rejected
+  const acgt = all - totals.x;
+  const share = k => totals[k] / all * 100;
+  const present = BASES.filter(([k]) => totals[k] > 0);
+
+  el('rFile').textContent = d.filename;
+  statValue(el('sLength'), num(d.total_length), 'bp');
+  // Same definition as the server: GC over unambiguous bases only.
+  if (acgt) statValue(el('sGC'), ((totals.g + totals.c) / acgt * 100).toFixed(1), '%');
+  else statValue(el('sGC'), '—');
+  el('sCount').textContent = num(d.sequence_count);
+
+  // The bar shows the share of all bases, so "other" is a segment here.
+  el('bar').replaceChildren(...present.map(([k]) => {
+    const segment = make('div', 's' + k);
+    segment.style.width = share(k).toFixed(3) + '%';
+    return segment;
+  }));
+  el('bar').setAttribute('aria-label', 'Base composition: ' +
+    present.map(([k, name]) => `${name} ${share(k).toFixed(1)} percent`).join(', '));
+
+  el('legend').replaceChildren(...present.map(([k, name]) => {
+    const item = make('span', null, `${name} ${share(k).toFixed(1)}%`);
+    const swatch = make('i');
+    swatch.style.background = `var(--${k})`;
+    item.prepend(swatch);
+    return item;
+  }));
+
+  el('recordsLabel').textContent = `${seqs.length === 1 ? 'Record' : 'Records'} (${num(seqs.length)})`;
+  el('recordsBox').open = seqs.length <= AUTO_OPEN;
+  const cards = seqs.slice(0, MAX_SHOWN).map(s => {
+    const card = make('article', 'record');
+    const stats = make('p', 'rstats');
+    stats.append(make('span', null, num(s.length) + ' bp'), make('span', null, 'GC ' + gcText(s.gc_content)));
+    card.append(make('h2', null, s.header), stats);
+    return card;
+  });
+  if (seqs.length > MAX_SHOWN) {
+    cards.push(make('p', 'empty', `…and ${num(seqs.length - MAX_SHOWN)} more records`));
+  }
+  el('records').replaceChildren(...cards);
+
+  el('results').hidden = false;
+}
+
+function renderHistory(items) {
+  const empty = el('historyEmpty');
+  empty.textContent = 'Nothing analysed yet.';
+  empty.hidden = items.length > 0;
+  el('history').replaceChildren(...items.map(a => {
+    const open = make('button', null, a.filename);
+    open.type = 'button';
+    open.dataset.id = a.id;
+    const row = make('li');
+    row.append(open, make('span', 'when', relative(a.uploaded_at)));
+    return row;
+  }));
+}
+
+async function loadHistory() {
+  try {
+    renderHistory(await api('/api/analyses', {}, 'History unavailable.'));
+  } catch {
+    el('history').replaceChildren();
+    el('historyEmpty').textContent = 'Previous analyses are unavailable right now.';
+    el('historyEmpty').hidden = false;
+  }
+}
+
+async function openAnalysis(id) {
+  clearError();
+  try {
+    renderAnalysis(await api('/api/analyses/' + encodeURIComponent(id), {}, 'That analysis could not be loaded.'));
+    el('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+async function upload(file) {
+  if (busy) return;  // ignore drops while an upload is in flight
+  clearError();
+  // Courtesy checks to skip a pointless upload; the server enforces both anyway.
+  if (!file.size) return showError('That file is empty. Choose a file containing FASTA records.');
+  if (file.size > MAX_BYTES)
+    return showError(`That file is ${(file.size / 1048576).toFixed(1)} MB. The limit is 2 MB — try a smaller subset.`);
+
+  busy = true;
+  drop.setAttribute('aria-busy', 'true');
+  el('dropTitle').textContent = 'Analysing…';
+  el('dropHint').textContent  = file.name;
+
+  try {
+    const body = new FormData();
+    body.append('file', file);
+    renderAnalysis(await api('/api/analyze', { method: 'POST', body }, 'That file could not be analysed.'));
+    loadHistory();
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    busy = false;
+    drop.removeAttribute('aria-busy');
+    el('dropTitle').textContent = 'Drop a FASTA file here';
+    el('dropHint').textContent  = 'or click to choose one — up to 2 MB';
+  }
+}
+
+// A file dropped anywhere outside the drop zone would make the browser open
+// it and leave the page; cancel that default everywhere.
+['dragover','drop'].forEach(t => window.addEventListener(t, e => e.preventDefault()));
+
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+});
+['dragenter','dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) upload(f); });
+fileInput.addEventListener('change', () => { const f = fileInput.files[0]; if (f) upload(f); fileInput.value = ''; });
+el('history').addEventListener('click', e => {
+  const b = e.target.closest('button[data-id]'); if (b) openAnalysis(b.dataset.id);
+});
+
+loadHistory();
+</script>
+</body>
+</html>

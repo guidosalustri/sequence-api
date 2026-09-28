@@ -1,0 +1,2 @@
+>seq1 <img src=x onerror=alert('xss')> <b>bold?</b>
+ACGTACGT

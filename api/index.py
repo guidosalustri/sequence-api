@@ -1,10 +1,12 @@
 import logging
 from dataclasses import asdict
+from pathlib import Path as FilePath
 from typing import Annotated
 
 from fastapi import FastAPI, Path, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -122,3 +124,12 @@ def get_analysis(analysis_id: Annotated[int, Path(ge=1, le=MAX_ID)]):
     if analysis is None:
         return error_response(404, "not_found", f"No analysis with id {analysis_id}.")
     return analysis
+
+
+# Local dev: serve the frontend from the same origin as the API, as Vercel
+# does (its CDN serves public/ before requests reach this app). Must stay
+# last: a mount at "/" matches everything, so routes registered after it
+# would never be reached. Skipped if public/ isn't in the deployed bundle.
+PUBLIC_DIR = FilePath(__file__).resolve().parent.parent / "public"
+if PUBLIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=PUBLIC_DIR, html=True), name="public")
