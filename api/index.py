@@ -1,38 +1,15 @@
 import logging
-import os
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.pool import NullPool
+
+from api.db import engine
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="sequence-api")
-
-
-def _make_engine() -> Engine | None:
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        return None
-    # Neon issues postgresql:// URLs, which SQLAlchemy maps to psycopg2.
-    # Point them at psycopg 3, the driver we actually install.
-    for prefix in ("postgresql://", "postgres://"):
-        if url.startswith(prefix):
-            url = "postgresql+psycopg://" + url[len(prefix):]
-            break
-    # Serverless: no pooling in-process; Neon's pooler handles it.
-    # connect_timeout (seconds) makes an unreachable DB fail fast instead of
-    # hanging until the function is killed; 10s leaves room for Neon cold starts.
-    return create_engine(
-        url,
-        poolclass=NullPool,
-        connect_args={"connect_timeout": 10},
-    )
-
-
-engine = _make_engine()
 
 
 @app.get("/api/health")
