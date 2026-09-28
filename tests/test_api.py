@@ -4,6 +4,7 @@ The parser tests own the validation rules; these check how results and
 errors reach the client. Tests using `db_client` need TEST_DATABASE_URL.
 """
 
+import secrets
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
 from api.index import MAX_ID, MAX_UPLOAD_BYTES
+from api.ncbi import NcbiUnavailable, Summary
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -116,3 +118,74 @@ def test_long_filename_is_trimmed_to_column_size(db_client):
     response = upload(db_client, name, (FIXTURES / "valid.fasta").read_bytes())
     assert response.status_code == 201
     assert response.json()["filename"] == name[:255]
+
+
+# --- NCBI enrichment (database needed; NCBI itself is always faked) -------------
+
+
+def fresh_accession() -> str:
+    # Unique per run: the cache persists between runs, and fake results must
+    # never be cached under a real accession.
+    return f"TST{secrets.randbelow(10**9):09d}.1"
+
+
+def fake_ncbi(monkeypatch, answer):
+    """Replace the NCBI call; `answer` is a dict to return or an exception to raise."""
+    calls = []
+
+    def fetch_summaries(accessions):
+        calls.append(accessions)
+        if isinstance(answer, Exception):
+            raise answer
+        return {accession: answer.get(accession) for accession in accessions}
+
+    monkeypatch.setattr("api.index.fetch_summaries", fetch_summaries)
+    return calls
+
+
+def test_ncbi_found_not_found_and_then_served_from_cache(db_client, monkeypatch):
+    known, unknown = fresh_accession(), fresh_accession()
+    fasta = f">{known} a\nACGT\n>{unknown} b\nACGT\n>plain_header c\nACGT\n".encode()
+    analysis = upload(db_client, "ncbi.fasta", fasta).json()
+    seq_known, seq_unknown, seq_plain = (str(s["id"]) for s in analysis["sequences"])
+    summary = Summary(known, "Test record", "Testus organismus", 1234)
+
+    calls = fake_ncbi(monkeypatch, {known: summary})
+    first = db_client.get(f"/api/analyses/{analysis['id']}/ncbi").json()
+    assert calls == [sorted([known, unknown])]  # one request for both
+    assert first["ncbi_available"] is True
+    assert first["records"][seq_known] == {
+        "accession": known,
+        "found": True,
+        "accession_version": known,
+        "title": "Test record",
+        "organism": "Testus organismus",
+        "length": 1234,
+        "url": f"https://www.ncbi.nlm.nih.gov/nuccore/{known}",
+    }
+    assert first["records"][seq_unknown]["found"] is False
+    assert seq_plain not in first["records"]  # no accession, nothing to look up
+
+    # Both answers are cached, including "not found": NCBI must not be asked again.
+    fake_ncbi(monkeypatch, AssertionError("NCBI called despite cache"))
+    assert db_client.get(f"/api/analyses/{analysis['id']}/ncbi").json() == first
+
+
+def test_ncbi_down_degrades_and_is_not_cached(db_client, monkeypatch):
+    accession = fresh_accession()
+    analysis = upload(db_client, "ncbi.fasta", f">{accession}\nACGT\n".encode()).json()
+    url = f"/api/analyses/{analysis['id']}/ncbi"
+
+    fake_ncbi(monkeypatch, NcbiUnavailable("simulated outage"))
+    response = db_client.get(url)
+    assert response.status_code == 200  # degraded, not failed
+    assert response.json() == {"ncbi_available": False, "records": {}}
+
+    # The failure wasn't cached: once NCBI is back, it is asked again.
+    calls = fake_ncbi(monkeypatch, {accession: Summary(accession, "Back", "Online", 4)})
+    assert db_client.get(url).json()["records"] != {}
+    assert calls == [[accession]]
+
+
+def test_ncbi_for_unknown_analysis_is_404(db_client):
+    assert db_client.get(f"/api/analyses/{MAX_ID}/ncbi").status_code == 404

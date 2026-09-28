@@ -1,19 +1,23 @@
 import logging
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path as FilePath
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import FastAPI, Path, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from api.db import Analysis, SequenceRecord, engine
+from api.db import Analysis, NcbiCache, SequenceRecord, engine
 from api.fasta import FastaError, parse_fasta
-from api.schemas import AnalysisDetail, AnalysisSummary
+from api.ncbi import NcbiUnavailable, Summary, extract_accession, fetch_summaries
+from api.schemas import AnalysisDetail, AnalysisSummary, NcbiEnrichment, NcbiRecord
 
 # 2 MiB. Vercel rejects request bodies over 4.5 MB before they reach us;
 # this lower cap is ours, so oversized files get a clean 413 we control.
@@ -22,6 +26,13 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 # ids are Postgres `integer`; a larger value makes Postgres raise
 # "integer out of range" (a 500), so reject it during validation instead.
 MAX_ID = 2**31 - 1
+
+# Record annotations change occasionally even within a version, so cached
+# lookups (found or not) are refetched after this long.
+NCBI_CACHE_TTL = timedelta(days=30)
+# Records looked up per analysis: the same 200 the page renders. Also keeps
+# one esummary request's URL a sensible length.
+MAX_NCBI_LOOKUPS = 200
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +135,98 @@ def get_analysis(analysis_id: Annotated[int, Path(ge=1, le=MAX_ID)]):
     if analysis is None:
         return error_response(404, "not_found", f"No analysis with id {analysis_id}.")
     return analysis
+
+
+@app.get("/api/analyses/{analysis_id}/ncbi", response_model=NcbiEnrichment)
+def ncbi_enrichment(analysis_id: Annotated[int, Path(ge=1, le=MAX_ID)]):
+    # 1. Read everything needed from the database, then release the connection.
+    cutoff = datetime.now(timezone.utc) - NCBI_CACHE_TTL
+    with Session(engine) as session:
+        if session.get(Analysis, analysis_id) is None:
+            return error_response(404, "not_found", f"No analysis with id {analysis_id}.")
+        rows = session.execute(
+            select(SequenceRecord.id, SequenceRecord.header)
+            .where(SequenceRecord.analysis_id == analysis_id)
+            .order_by(SequenceRecord.id)
+            .limit(MAX_NCBI_LOOKUPS)
+        ).all()
+        accession_of = {seq_id: extract_accession(header) for seq_id, header in rows}
+        wanted = {accession for accession in accession_of.values() if accession}
+        known: dict[str, Summary | None] = {
+            row.accession: _cached_summary(row)
+            for row in session.scalars(
+                select(NcbiCache).where(
+                    NcbiCache.accession.in_(wanted), NcbiCache.fetched_at > cutoff
+                )
+            )
+        }
+
+    # 2. Ask NCBI for the rest. No database connection is held meanwhile:
+    #    the call can take seconds, and an idle pooled connection is wasted.
+    missing = sorted(wanted - known.keys())
+    ncbi_available = True
+    if missing:
+        try:
+            fetched = fetch_summaries(missing)
+        except NcbiUnavailable:
+            logger.warning("NCBI unavailable", exc_info=True)
+            ncbi_available = False
+        else:
+            # 3. Cache NCBI's answers, found or not. Failures are never cached.
+            _store_summaries(fetched)
+            known.update(fetched)
+
+    return {
+        "ncbi_available": ncbi_available,
+        "records": {
+            seq_id: _ncbi_record(accession, known[accession])
+            for seq_id, accession in accession_of.items()
+            if accession in known
+        },
+    }
+
+
+def _cached_summary(row: NcbiCache) -> Summary | None:
+    if row.accession_version is None:  # cached "not found"
+        return None
+    return Summary(row.accession_version, row.title, row.organism, row.length)
+
+
+def _store_summaries(fetched: dict[str, Summary | None]) -> None:
+    rows = [
+        {"accession": accession, **asdict(summary)}
+        if summary
+        else {"accession": accession, "accession_version": None, "title": None,
+              "organism": None, "length": None}
+        for accession, summary in fetched.items()
+    ]
+    # Upsert: insert new accessions, refresh expired ones, in one statement.
+    # Also safe when two requests look up the same accession concurrently.
+    stmt = pg_insert(NcbiCache).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[NcbiCache.accession],
+        set_={
+            "fetched_at": func.now(),
+            "accession_version": stmt.excluded.accession_version,
+            "title": stmt.excluded.title,
+            "organism": stmt.excluded.organism,
+            "length": stmt.excluded.length,
+        },
+    )
+    with Session(engine) as session, session.begin():
+        session.execute(stmt)
+
+
+def _ncbi_record(accession: str, summary: Summary | None) -> NcbiRecord:
+    if summary is None:
+        return NcbiRecord(accession=accession, found=False)
+    return NcbiRecord(
+        accession=accession,
+        found=True,
+        **asdict(summary),
+        # Built here from a fixed https prefix; the page never assembles URLs.
+        url=f"https://www.ncbi.nlm.nih.gov/nuccore/{quote(summary.accession_version)}",
+    )
 
 
 # Local dev: serve the frontend from the same origin as the API, as Vercel

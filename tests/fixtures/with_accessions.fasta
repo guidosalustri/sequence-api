@@ -1,0 +1,10 @@
+>NM_000546.6 test fragment (bases are made up)
+ACGTGGCCAATTGGCCAACG
+>MN908947.3 test fragment (bases are made up)
+ATTAAAGGTTTATACCTTCC
+>NM_000546 unversioned, NCBI resolves to the latest version
+GGCCAATTACGT
+>ZZ999999.9 not a real accession
+ACGTACGT
+>sample07_contig_12 no accession in this header
+ACGTACGT

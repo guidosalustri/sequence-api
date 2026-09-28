@@ -154,6 +154,7 @@
   .stat .label { font-size: 13px; color: var(--ink-2); margin: 0 0 6px; }
   .stat .value { font-size: 25px; font-weight: 500; letter-spacing: -0.02em; margin: 0; }
   .stat .value small { font-size: 15px; font-weight: 400; opacity: .65; margin-left: 1px; }
+  .stat .sub { margin: 4px 0 0; font-size: 12.5px; color: var(--ink-2); }
 
   .stat-len { background: var(--tint-c); border-color: var(--c); }
   .stat-len .value { color: var(--c-ink); }
@@ -195,6 +196,9 @@
   }
   .record .rstats { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); margin: 0; }
   .record .rstats span + span { margin-left: 16px; }
+  .record .ncbi { margin: 7px 0 0; font-size: 12.5px; color: var(--ink-2); word-break: break-word; }
+  .record .ncbi a { color: var(--accent); }
+  .ncbi-note { margin: 0 0 10px; font-size: 13px; color: var(--ink-3); }
 
   /* ---------- history ---------- */
 
@@ -207,11 +211,16 @@
   .past button {
     background: none; border: 0; padding: 0; font: inherit;
     font-family: var(--mono); font-size: 13px; color: var(--ink);
-    cursor: pointer; text-align: left; word-break: break-all;
+    cursor: pointer; text-align: left;
+    /* One line, cut with "…"; the full name is in the tooltip (title).
+       min-width: 0 lets a flex item shrink below its content's width. */
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
   }
   .past button:hover { color: var(--accent); }
   .past button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
   .past .when { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
+  .past li[aria-busy="true"] { cursor: progress; }
+  .past li[aria-busy="true"] .when { color: var(--accent); }
 
   .empty { padding: 20px 18px; font-size: 14px; color: var(--ink-3); margin: 0; }
 
@@ -245,7 +254,7 @@
     <p class="filename" id="rFile"></p>
 
     <div class="stats">
-      <div class="card stat stat-len"><p class="label">Length</p><p class="value" id="sLength">—</p></div>
+      <div class="card stat stat-len"><p class="label">Total length</p><p class="value" id="sLength">—</p><p class="sub" id="sRange" hidden></p></div>
       <div class="card stat stat-gc"><p class="label">GC content</p><p class="value" id="sGC">—</p></div>
       <div class="card stat stat-num"><p class="label">Sequences</p><p class="value" id="sCount">—</p></div>
     </div>
@@ -258,6 +267,7 @@
 
     <details class="records" id="recordsBox">
       <summary class="section-label" id="recordsLabel">Records</summary>
+      <p class="ncbi-note" id="ncbiNote" role="status" hidden></p>
       <div class="card" id="records"></div>
     </details>
   </section>
@@ -279,6 +289,11 @@ const BASES = [['a','A'],['c','C'],['g','G'],['t','T'],['x','other']];
 const el = id => document.getElementById(id);
 const drop = el('drop'), fileInput = el('file'), msg = el('msg');
 let busy = false;
+let ncbiRequest = 0;  // only the latest NCBI lookup may update the page
+let viewRequest = 0;  // only the latest analysis asked for (click or upload) is rendered
+// Analyses never change once stored, so one fetched before needs no new request.
+// Lives until the page reloads.
+const analysisCache = new Map();
 
 const num = n => Number(n).toLocaleString('en-US');
 const gcText = f => f === null ? '—' : (f * 100).toFixed(1) + '%';  // null: no A/C/G/T in record
@@ -331,7 +346,9 @@ function renderAnalysis(d) {
   const seqs = d.sequences;
 
   const totals = { a:0, c:0, g:0, t:0, x:0 };
+  let shortest = Infinity, longest = 0;
   for (const s of seqs) {
+    shortest = Math.min(shortest, s.length); longest = Math.max(longest, s.length);
     totals.a += s.count_a; totals.c += s.count_c;
     totals.g += s.count_g; totals.t += s.count_t;
     totals.x += s.count_other;
@@ -343,6 +360,11 @@ function renderAnalysis(d) {
 
   el('rFile').textContent = d.filename;
   statValue(el('sLength'), num(d.total_length), 'bp');
+  // Records are independent sequences, so the spread says more than the sum:
+  // short reads, genes or whole genomes? (Same figures as `seqkit stats`.)
+  const average = (d.total_length / d.sequence_count).toLocaleString('en-US', { maximumFractionDigits: 1 });
+  el('sRange').textContent = `${num(shortest)}–${num(longest)} bp per record · avg ${average}`;
+  el('sRange').hidden = seqs.length === 1;  // would only repeat the total
   // Same definition as the server: GC over unambiguous bases only.
   if (acgt) statValue(el('sGC'), ((totals.g + totals.c) / acgt * 100).toFixed(1), '%');
   else statValue(el('sGC'), '—');
@@ -369,6 +391,7 @@ function renderAnalysis(d) {
   el('recordsBox').open = seqs.length <= AUTO_OPEN;
   const cards = seqs.slice(0, MAX_SHOWN).map(s => {
     const card = make('article', 'record');
+    card.dataset.id = s.id;  // lets NCBI results find their card
     const stats = make('p', 'rstats');
     stats.append(make('span', null, num(s.length) + ' bp'), make('span', null, 'GC ' + gcText(s.gc_content)));
     card.append(make('h2', null, s.header), stats);
@@ -380,6 +403,48 @@ function renderAnalysis(d) {
   el('records').replaceChildren(...cards);
 
   el('results').hidden = false;
+  loadNcbi(d.id);  // stats are already on screen; NCBI info fills in after
+}
+
+async function loadNcbi(id) {
+  const request = ++ncbiRequest;
+  const note = el('ncbiNote');
+  note.textContent = 'Checking NCBI…';
+  note.hidden = false;
+  let enrichment = null;
+  try {
+    enrichment = await api(`/api/analyses/${id}/ncbi`, {}, 'NCBI lookup failed.');
+  } catch {
+    // Same outcome as NCBI being down: local stats stay, with a note.
+  }
+  // A newer render started meanwhile (another analysis, or this one reopened):
+  // its own lookup will fill the cards, so this answer is stale.
+  if (request !== ncbiRequest) return;
+
+  if (!enrichment || !enrichment.ncbi_available) {
+    note.textContent = 'NCBI info unavailable right now — showing local stats only.';
+  } else {
+    note.hidden = true;
+  }
+  for (const [seqId, record] of Object.entries(enrichment?.records ?? {})) {
+    const card = el('records').querySelector(`[data-id="${seqId}"]`);
+    if (card) card.append(ncbiLine(record));
+  }
+}
+
+function ncbiLine(record) {
+  const line = make('p', 'ncbi');
+  if (!record.found) {
+    line.textContent = `No NCBI record for ${record.accession}`;
+    return line;
+  }
+  // url comes from our API, built from a fixed https://www.ncbi.nlm.nih.gov/ prefix.
+  const link = make('a', null, record.title);
+  link.href = record.url;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  line.append(link, ` · ${record.organism} · NCBI record ${num(record.length)} bp`);
+  return line;
 }
 
 function renderHistory(items) {
@@ -390,6 +455,7 @@ function renderHistory(items) {
     const open = make('button', null, a.filename);
     open.type = 'button';
     open.dataset.id = a.id;
+    open.title = a.filename;  // full name on hover; a property, so plain text
     const row = make('li');
     row.append(open, make('span', 'when', relative(a.uploaded_at)));
     return row;
@@ -406,13 +472,27 @@ async function loadHistory() {
   }
 }
 
-async function openAnalysis(id) {
+async function openAnalysis(id, row) {
+  const request = ++viewRequest;
   clearError();
+  const when = row.querySelector('.when');
+  const time = when.textContent;
+  when.textContent = 'Loading…';
+  row.setAttribute('aria-busy', 'true');
   try {
-    renderAnalysis(await api('/api/analyses/' + encodeURIComponent(id), {}, 'That analysis could not be loaded.'));
+    let d = analysisCache.get(id);
+    if (!d) {
+      d = await api('/api/analyses/' + encodeURIComponent(id), {}, 'That analysis could not be loaded.');
+      analysisCache.set(id, d);
+    }
+    if (request !== viewRequest) return;  // something newer was asked for meanwhile
+    renderAnalysis(d);
     el('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
-    showError(e.message);
+    if (request === viewRequest) showError(e.message);
+  } finally {
+    when.textContent = time;
+    row.removeAttribute('aria-busy');
   }
 }
 
@@ -432,7 +512,10 @@ async function upload(file) {
   try {
     const body = new FormData();
     body.append('file', file);
-    renderAnalysis(await api('/api/analyze', { method: 'POST', body }, 'That file could not be analysed.'));
+    const request = ++viewRequest;
+    const d = await api('/api/analyze', { method: 'POST', body }, 'That file could not be analysed.');
+    analysisCache.set(String(d.id), d);  // reopening it from the history is instant
+    if (request === viewRequest) renderAnalysis(d);
     loadHistory();
   } catch (e) {
     showError(e.message);
@@ -457,7 +540,7 @@ drop.addEventListener('keydown', e => {
 drop.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) upload(f); });
 fileInput.addEventListener('change', () => { const f = fileInput.files[0]; if (f) upload(f); fileInput.value = ''; });
 el('history').addEventListener('click', e => {
-  const b = e.target.closest('button[data-id]'); if (b) openAnalysis(b.dataset.id);
+  const b = e.target.closest('button[data-id]'); if (b) openAnalysis(b.dataset.id, b.closest('li'));
 });
 
 loadHistory();

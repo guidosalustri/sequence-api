@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 
-from sqlalchemy import DateTime, Engine, ForeignKey, String, create_engine, func
+from sqlalchemy import DateTime, Engine, ForeignKey, String, Text, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.pool import NullPool
 
@@ -70,3 +70,19 @@ class SequenceRecord(Base):
     count_other: Mapped[int]
 
     analysis: Mapped[Analysis] = relationship(back_populates="sequences")
+
+
+class NcbiCache(Base):
+    """One NCBI lookup, found or not. Rows older than the TTL are refetched."""
+
+    __tablename__ = "ncbi_cache"
+
+    accession: Mapped[str] = mapped_column(String(40), primary_key=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # All four are None when NCBI has no such record (a cached "not found").
+    accession_version: Mapped[str | None] = mapped_column(String(40))
+    title: Mapped[str | None] = mapped_column(Text)
+    organism: Mapped[str | None] = mapped_column(Text)
+    length: Mapped[int | None]
