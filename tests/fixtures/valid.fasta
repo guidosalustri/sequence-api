@@ -1,0 +1,8 @@
+>seq1 test record wrapped over two lines
+ACGTACGTACGTGGCCAATT
+GGCCTTAAACGT
+
+>seq2 soft-masked with ambiguity codes
+acgtacgtNNNNACGTRYAC
+>rna1 RNA fragment
+AUGGCCAUUGUAAUGGGCCGC
