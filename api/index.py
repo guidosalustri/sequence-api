@@ -1,20 +1,25 @@
 import logging
 from dataclasses import asdict
+from typing import Annotated
 
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Path, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from api.db import Analysis, SequenceRecord, engine
 from api.fasta import FastaError, parse_fasta
-from api.schemas import AnalysisDetail
+from api.schemas import AnalysisDetail, AnalysisSummary
 
 # 2 MiB. Vercel rejects request bodies over 4.5 MB before they reach us;
 # this lower cap is ours, so oversized files get a clean 413 we control.
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+
+# ids are Postgres `integer`; a larger value makes Postgres raise
+# "integer out of range" (a 500), so reject it during validation instead.
+MAX_ID = 2**31 - 1
 
 logger = logging.getLogger(__name__)
 
@@ -93,4 +98,27 @@ def analyze(file: UploadFile):
     # loaded, so building the response doesn't open a second connection.
     with Session(engine, expire_on_commit=False) as session, session.begin():
         session.add(analysis)
+    return analysis
+
+
+@app.get("/api/analyses", response_model=list[AnalysisSummary])
+def list_analyses():
+    # Newest first. id follows insert order and is the indexed primary key.
+    # Sequences are never loaded: the relationship is lazy and unused here.
+    with Session(engine) as session:
+        return session.scalars(
+            select(Analysis).order_by(Analysis.id.desc()).limit(50)
+        ).all()
+
+
+@app.get("/api/analyses/{analysis_id}", response_model=AnalysisDetail)
+def get_analysis(analysis_id: Annotated[int, Path(ge=1, le=MAX_ID)]):
+    # Sequences must be loaded before the session closes, because FastAPI
+    # serializes after we return. selectinload = one extra indexed query.
+    with Session(engine) as session:
+        analysis = session.get(
+            Analysis, analysis_id, options=[selectinload(Analysis.sequences)]
+        )
+    if analysis is None:
+        return error_response(404, "not_found", f"No analysis with id {analysis_id}.")
     return analysis
