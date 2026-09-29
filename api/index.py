@@ -9,7 +9,7 @@ from fastapi import FastAPI, Path, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -33,6 +33,14 @@ NCBI_CACHE_TTL = timedelta(days=30)
 # Records looked up per analysis: the same 200 the page renders. Also keeps
 # one esummary request's URL a sensible length.
 MAX_NCBI_LOOKUPS = 200
+
+# Storage caps: every table a stranger can grow has one, so no one can fill
+# Neon's free tier (~512 MB for the whole project). Oldest rows go first, so
+# the demo keeps working instead of refusing uploads once full.
+# Worst-case analysis measured at 3.06 MiB (10,000 records, 2 MiB of headers):
+# 50 of them is ~153 MiB. 50 is also exactly what the history list shows.
+MAX_STORED_ANALYSES = 50
+MAX_NCBI_CACHE_ROWS = 20_000  # ~5 MB
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +119,19 @@ def analyze(file: UploadFile):
     # loaded, so building the response doesn't open a second connection.
     with Session(engine, expire_on_commit=False) as session, session.begin():
         session.add(analysis)
+        session.flush()  # insert now, so the new analysis counts toward the cap
+        # Delete everything at or below the (cap+1)-th newest id; with fewer
+        # analyses than that, the subquery is NULL and nothing matches.
+        # Their sequences go too, via ON DELETE CASCADE (fast thanks to the
+        # index on sequences.analysis_id).
+        cutoff = (
+            select(Analysis.id)
+            .order_by(Analysis.id.desc())
+            .offset(MAX_STORED_ANALYSES)
+            .limit(1)
+            .scalar_subquery()
+        )
+        session.execute(delete(Analysis).where(Analysis.id <= cutoff))
     return analysis
 
 
@@ -213,8 +234,16 @@ def _store_summaries(fetched: dict[str, Summary | None]) -> None:
             "length": stmt.excluded.length,
         },
     )
+    # Keep only the newest rows. NOT IN rather than a timestamp cutoff: rows
+    # written by one upsert share fetched_at, so a cutoff could be off by a batch.
+    newest = (
+        select(NcbiCache.accession)
+        .order_by(NcbiCache.fetched_at.desc())
+        .limit(MAX_NCBI_CACHE_ROWS)
+    )
     with Session(engine) as session, session.begin():
         session.execute(stmt)
+        session.execute(delete(NcbiCache).where(NcbiCache.accession.not_in(newest)))
 
 
 def _ncbi_record(accession: str, summary: Summary | None) -> NcbiRecord:

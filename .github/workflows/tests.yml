@@ -1,0 +1,16 @@
+# Runs the test suite on GitHub's servers for every push and pull request.
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version  # same version as local and Vercel
+      - run: pip install -r requirements-dev.txt
+      # No TEST_DATABASE_URL here, so the database tests skip (see tests/conftest.py).
+      - run: pytest

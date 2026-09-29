@@ -8,9 +8,11 @@ import secrets
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
 
+from api.db import Analysis, NcbiCache, engine
 from api.index import MAX_ID, MAX_UPLOAD_BYTES
 from api.ncbi import NcbiUnavailable, Summary
 
@@ -189,3 +191,45 @@ def test_ncbi_down_degrades_and_is_not_cached(db_client, monkeypatch):
 
 def test_ncbi_for_unknown_analysis_is_404(db_client):
     assert db_client.get(f"/api/analyses/{MAX_ID}/ncbi").status_code == 404
+
+
+# --- storage caps (database needed) ---------------------------------------------
+# Each test sets its cap to "exactly what exists now", so one more row must
+# push out exactly one old row. On the shared dev branch that removes one old
+# row per run, never more.
+
+
+def stored(column):
+    with Session(engine) as session:
+        return session.scalars(select(column)).all()
+
+
+def test_upload_past_the_cap_drops_only_the_oldest_analysis(db_client, monkeypatch):
+    upload(db_client, "valid.fasta")  # at least one analysis exists to be dropped
+    before = sorted(stored(Analysis.id))
+    monkeypatch.setattr("api.index.MAX_STORED_ANALYSES", len(before))
+
+    new_id = upload(db_client, "valid.fasta").json()["id"]
+
+    after = sorted(stored(Analysis.id))
+    assert len(after) == len(before)  # didn't grow
+    assert before[0] not in after  # the oldest went
+    assert after == before[1:] + [new_id]  # and nothing else did
+
+
+def test_ncbi_cache_past_the_cap_keeps_the_newest(db_client, monkeypatch):
+    seed, accession = fresh_accession(), fresh_accession()
+    seeded = upload(db_client, "ncbi.fasta", f">{seed}\nACGT\n".encode()).json()
+    fake_ncbi(monkeypatch, {})  # seed is "not found", which is cached too
+    db_client.get(f"/api/analyses/{seeded['id']}/ncbi")  # so at least one row exists
+
+    analysis = upload(db_client, "ncbi.fasta", f">{accession}\nACGT\n".encode()).json()
+    before = len(stored(NcbiCache.accession))
+    monkeypatch.setattr("api.index.MAX_NCBI_CACHE_ROWS", before)
+
+    fake_ncbi(monkeypatch, {accession: None})
+    db_client.get(f"/api/analyses/{analysis['id']}/ncbi")
+
+    after = stored(NcbiCache.accession)
+    assert len(after) == before  # didn't grow
+    assert accession in after  # the newest row is kept
