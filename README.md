@@ -1,48 +1,111 @@
-# sequence-api
+# Sequence Analysis API
 
-FastAPI service deployed on Vercel, backed by Postgres on Neon.
+[![tests](https://github.com/guidosalustri/sequence-api/actions/workflows/tests.yml/badge.svg)](https://github.com/guidosalustri/sequence-api/actions/workflows/tests.yml)
 
-Production: https://sequence-api-peach.vercel.app
+Upload a FASTA file, get sequence statistics back, browse past analyses, with records enriched from NCBI.
 
-## Endpoints
+**Live demo: https://sequence-api-peach.vercel.app**
 
-| Method | Path            | Response                                                        |
-| ------ | --------------- | --------------------------------------------------------------- |
-| GET    | `/api/health`   | `{"status": "ok"}` — never touches the database                 |
-| GET    | `/api/db-check` | `{"status": "ok", "result": 1}` after `SELECT 1`, or `503` with `{"status": "error", "error": "<reason>"}` |
+<p align="center">
+  <img src="screenshot2.png" alt="The upload page: a drop zone and the list of previous analyses" width="49%">
+</p>
 
-## Local development
+The point of the project is the backend: **take input from a stranger, handle it safely, store it, and give it back without falling over.** Every rejected input gets a specific status code and a message that says exactly what is wrong, the database can't be filled by abuse, and a slow or broken external API degrades the page instead of breaking it. It runs entirely on free tiers (Vercel Hobby, Neon Free).
 
-Requires [uv](https://docs.astral.sh/uv/). It installs Python 3.12 (from `.python-version`) if needed.
+<p align="center">
+  <img src="screenshot3.png" alt="An analysis: total length, GC content, base composition, and records linked to NCBI" width="49%">
+</p>
 
-```sh
-uv venv
-uv pip install -r requirements.txt uvicorn
-```
+## What's a FASTA file?
 
-Create `.env` (gitignored) with your Neon connection string:
+FASTA is the standard plain-text format for biological sequences. A file holds one or more **records**: a header line starting with `>`, followed by the sequence, often wrapped over several lines.
 
 ```
-DATABASE_URL=postgresql://USER:PASSWORD@HOST-pooler.REGION.aws.neon.tech/DB?sslmode=require
+>seq1 first record
+ACGTGGCCAATTGGCCAACGTTAGC
+GGCCAATTACGT
+>seq2 second record
+ATTAAAGGTTTATACCTTCC
 ```
 
-Run:
+The first word of a header is usually an identifier. When it's an NCBI accession such as `NM_000546.6`, this project looks the record up and shows what it is.
 
-```sh
-uv run --env-file .env uvicorn api.index:app --reload
+## Architecture
+
+```mermaid
+flowchart LR
+    B[Browser] -->|"page (GET /)"| CDN["Vercel CDN<br/>public/index.html"]
+    B -->|"/api/*"| F["Vercel Function<br/>FastAPI"]
+    F -->|"SQLAlchemy + psycopg<br/>via Neon's pooler"| DB[("Neon Postgres<br/>analyses · sequences · ncbi_cache")]
+    F -->|"esummary, 5 s timeout"| N["NCBI E-utilities"]
 ```
 
-Then open http://127.0.0.1:8000/api/health and http://127.0.0.1:8000/api/db-check.
+## API
 
-## Deployment
+| Method | Path | Success | Errors |
+| --- | --- | --- | --- |
+| `POST` | `/api/analyze` | `201`: the stored analysis with per-record stats | `413`, `422`, `503` |
+| `GET` | `/api/analyses` | `200`: the newest 50 analyses (summaries) | `503` |
+| `GET` | `/api/analyses/{id}` | `200`: one analysis with its records | `404`, `422`, `503` |
+| `GET` | `/api/analyses/{id}/ncbi` | `200`: NCBI info keyed by record id, plus `ncbi_available` | `404`, `422`, `503` |
+| `GET` | `/api/health` | `200`: never touches the database | |
+| `GET` | `/api/db-check` | `200` after `SELECT 1` (a deployment diagnostic with its own error shape) | `503` |
 
-Vercel detects FastAPI automatically from `api/index.py` (the `app` instance) and installs `requirements.txt`. There is no `vercel.json`, by design.
+Every other error has the same shape: a stable code for programs and a sentence for people.
 
-Set `DATABASE_URL` in the Vercel project's environment variables (the Neon integration does this automatically). Use Neon's **pooled** connection string (host contains `-pooler`).
+```json
+{"error": "bad_character", "message": "Line 14, column 5: unexpected character 'J'. Only nucleotide sequences are supported (A, C, G, T/U, N and IUPAC codes)."}
+```
 
-## Design notes
+GC content is (G+C)/(A+C+G+T): ambiguous bases are excluded, and U counts as T. Interactive docs: [`/docs`](https://sequence-api-peach.vercel.app/docs).
 
-- **`NullPool`**: serverless function instances don't persist between invocations, so an in-process SQLAlchemy pool would hold connections nothing reuses. Every request opens and closes a real connection; Neon's pooler (PgBouncer) does the pooling.
-- **psycopg 3**: the app rewrites `postgresql://` URLs to `postgresql+psycopg://`, because SQLAlchemy otherwise defaults to psycopg2, which isn't installed.
-- **`connect_timeout=10`**: an unreachable database fails with a `503` instead of hanging until Vercel kills the function.
-- **Sync endpoints (`def`)**: FastAPI runs them in a threadpool, so blocking database calls don't stall the event loop.
+## Validation
+
+Handling bad input is the main feature. The first problem found is reported:
+
+| Input | Status | `error` |
+| --- | --- | --- |
+| Larger than 2 MB | 413 | `file_too_large` |
+| Empty, or only whitespace | 422 | `empty_file` |
+| Binary (e.g. a JPEG renamed to `.fasta`) or not UTF-8 | 422 | `not_text` |
+| Doesn't start with a `>` header | 422 | `not_fasta` |
+| `>` with nothing after it | 422 | `empty_header` |
+| Header over 1,000 characters | 422 | `header_too_long` |
+| A character outside the nucleotide alphabet (protein, alignment gaps, digits); the message names the line, column and character | 422 | `bad_character` |
+| A header with no sequence under it | 422 | `empty_sequence` |
+| More than 10,000 records | 422 | `too_many_records` |
+| No file in the request, or an id outside the valid range | 422 | `invalid_request` |
+
+Real-world formatting is accepted rather than rejected: Windows and old-Mac line endings, a UTF-8 byte-order mark, blank lines, lowercase bases, spaces inside sequence lines, and unwrapped sequences of any length.
+
+## Design decisions
+
+- **Serverless database access:** `NullPool` with Neon's pooler, and a 10 s connect timeout, so an unreachable database returns a clean `503`.
+- **Hand-written parser** for line and column error messages. Characters are validated before uppercasing (`'ß'.upper()` is `'SS'`).
+- **Upload limit enforced by reading 2 MiB + 1 byte**, not by trusting `Content-Length`.
+- **NCBI at view time, never at upload.** No database connection is held during the call, results are cached in Postgres for 30 days, and any failure degrades to local stats.
+- **Storage caps on every table a stranger can grow:** the newest 50 analyses (worst case measured at 3.06 MiB each, about 153 MiB of the 512 MB free tier) and the newest 20,000 NCBI cache rows.
+- **Untrusted text is rendered only with `textContent`**, never `innerHTML`.
+- **Tests can't reach production:** they connect only through `TEST_DATABASE_URL`.
+
+## Limits
+
+2 MB per file · 10,000 records per file · headers up to 1,000 characters · nucleotide sequences only (DNA/RNA with IUPAC codes) · UTF-8 text · the newest 50 analyses are kept.
+
+## Tests
+
+66 pytest tests cover every validation rule at its boundaries, status codes and error shapes, a database outage, NCBI caching and outages, and the storage caps. The NCBI client is tested against real saved NCBI responses; the suite never calls NCBI itself. [GitHub Actions](.github/workflows/tests.yml) runs it on every push.
+
+## Project layout
+
+```
+api/
+  index.py        routes, error handling, storage caps
+  fasta.py        FASTA parser and validation
+  ncbi.py         NCBI E-utilities client
+  db.py           engine and table models
+  schemas.py      response models
+public/index.html the page (vanilla JS, no build step)
+scripts/create_tables.py
+tests/            pytest suite and fixtures
+```
